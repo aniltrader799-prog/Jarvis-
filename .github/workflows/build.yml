@@ -19,7 +19,6 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      # 1. Flutter वर्ज़न 3.22.3 पर सेट करें (3.24 में Gradle कॉन्फ्लिक्ट होता है)
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -30,7 +29,6 @@ jobs:
       - name: Create Flutter project
         run: flutter create --org com.example --project-name jarvis --platforms android .
 
-      # 2. pubspec.yaml में speech_to_text को 7.0.0 पर पिन करें
       - name: Write pubspec.yaml
         run: |
           cat << 'EOF' > pubspec.yaml
@@ -57,7 +55,6 @@ jobs:
             uses-material-design: true
           EOF
 
-      # 3. android/build.gradle फाइल को सही Kotlin और Gradle वर्ज़न के साथ लिखें
       - name: Write android/build.gradle
         run: |
           cat << 'EOF' > android/build.gradle
@@ -93,7 +90,6 @@ jobs:
           }
           EOF
 
-      # 4. android/app/build.gradle फाइल में compileSdk 36 और minSdk 21 सेट करें
       - name: Write android/app/build.gradle
         run: |
           cat << 'EOF' > android/app/build.gradle
@@ -159,7 +155,7 @@ jobs:
           }
           EOF
 
-      # 5. lib/main.dart लिखें
+      # 5. lib/main.dart लिखें (यहाँ 'screenshot' वाला एरर फिक्स कर दिया गया है)
       - name: Write lib/main.dart
         run: |
           mkdir -p lib
@@ -263,8 +259,10 @@ jobs:
             final String apiKey, model, lang;
             Gemini({required this.apiKey, this.model = 'gemini-2.5-flash',
                     this.lang = 'hi-IN'});
+            
+            // यहाँ 'shot' की जगह 'screenshot' कर दिया गया है
             Future<JarvisAction> decide({
-              required String goal, required Shot? shot,
+              required String goal, required Shot? screenshot,
               required String tree, required List<String> history,
             }) async {
               final langName = {'en-US':'English','hi-IN':'Hindi','or-IN':'Odia'}[lang] ?? 'Hindi';
@@ -281,8 +279,10 @@ jobs:
           5. action="done" only when goal achieved.
           Return ONLY valid JSON.''';
               final parts = <Map<String, dynamic>>[{'text': prompt}];
-              if (shot != null) parts.add({
-                'inline_data': {'mime_type': 'image/jpeg', 'data': shot.base64}
+              
+              // यहाँ भी 'shot' की जगह 'screenshot' कर दिया गया है
+              if (screenshot != null) parts.add({
+                'inline_data': {'mime_type': 'image/jpeg', 'data': screenshot.base64}
               });
               final body = {
                 'contents': [{'role':'user','parts':parts}],
@@ -586,7 +586,6 @@ jobs:
           }
           EOF
 
-      # 6. कस्टम Android फ़ाइलें लिखें
       - name: Write custom Android files
         run: |
           KT=android/app/src/main/kotlin/com/example/jarvis
@@ -915,15 +914,12 @@ jobs:
           </manifest>
           EOF
 
-      # 7. डिपेंडेंसी इंस्टॉल करें
       - name: Get dependencies
         run: flutter pub get
 
-      # 8. APK बिल्ड करें
       - name: Build APK
         run: flutter build apk --debug
 
-      # 9. APK अपलोड करें
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
