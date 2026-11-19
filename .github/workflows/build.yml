@@ -1,0 +1,455 @@
+name: Build Jarvis
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Create Flutter project
+        run: |
+          if [ ! -f android/build.gradle ]; then
+            flutter create --org com.example --project-name jarvis --platforms android .
+          fi
+
+      - name: Write custom Android files
+        run: |
+          set -e
+          KT=android/app/src/main/kotlin/com/example/jarvis
+          mkdir -p "$KT"
+          mkdir -p android/app/src/main/res/xml
+          mkdir -p android/app/src/main/res/values
+
+          cat > "$KT/MainActivity.kt" << 'KT_EOF'
+          package com.example.jarvis
+          import android.content.Intent
+          import android.graphics.Bitmap
+          import android.os.Build
+          import android.util.Base64
+          import androidx.annotation.RequiresApi
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+          import java.io.ByteArrayOutputStream
+          import java.util.concurrent.CountDownLatch
+          import java.util.concurrent.TimeUnit
+
+          class MainActivity : FlutterActivity() {
+              private val CHANNEL = "jarvis/native"
+              override fun configureFlutterEngine(engine: FlutterEngine) {
+                  super.configureFlutterEngine(engine)
+                  MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
+                      .setMethodCallHandler { call, result ->
+                          val svc = JarvisAccessibilityService.instance
+                          if (svc == null) {
+                              result.error("NO_SERVICE",
+                                  "Accessibility OFF", null)
+                              return@setMethodCallHandler
+                          }
+                          when (call.method) {
+                              "getUiTree" -> try {
+                                  result.success(svc.getPrunedTree())
+                              } catch (e: Exception) {
+                                  result.error("TREE", e.message, null)
+                              }
+                              "captureScreenshot" -> {
+                                  if (Build.VERSION.SDK_INT < 30) {
+                                      result.error("OLD", "Need Android 11+", null)
+                                      return@setMethodCallHandler
+                                  }
+                                  captureAsync(svc, result)
+                              }
+                              "tap" -> {
+                                  val x = (call.argument<Double>("x") ?: 0.0).toFloat()
+                                  val y = (call.argument<Double>("y") ?: 0.0).toFloat()
+                                  val latch = CountDownLatch(1)
+                                  var ok = false
+                                  svc.tapScreen(x, y) { s -> ok = s; latch.countDown() }
+                                  latch.await(2, TimeUnit.SECONDS)
+                                  result.success(ok)
+                              }
+                              "swipe" -> {
+                                  val a = (call.argument<Double>("x1")?:0.0).toFloat()
+                                  val b = (call.argument<Double>("y1")?:0.0).toFloat()
+                                  val c = (call.argument<Double>("x2")?:0.0).toFloat()
+                                  val d = (call.argument<Double>("y2")?:0.0).toFloat()
+                                  svc.swipeScreen(a,b,c,d,300){ result.success(it) }
+                              }
+                              "back" -> result.success(svc.goBack())
+                              "home" -> result.success(svc.goHome())
+                              "type" -> {
+                                  val t = call.argument<String>("text") ?: ""
+                                  val i = call.argument<Int>("nodeIndex") ?: -1
+                                  result.success(svc.typeText(t, i))
+                              }
+                              "isKillSwitchActive" ->
+                                  result.success(JarvisAccessibilityService.killSwitch.get())
+                              "resetKillSwitch" -> {
+                                  JarvisAccessibilityService.killSwitch.set(false)
+                                  result.success(true)
+                              }
+                              "startForegroundService" -> {
+                                  startService(Intent(this@MainActivity,
+                                      JarvisForegroundService::class.java))
+                                  result.success(true)
+                              }
+                              "stopForegroundService" -> {
+                                  stopService(Intent(this@MainActivity,
+                                      JarvisForegroundService::class.java))
+                                  result.success(true)
+                              }
+                              else -> result.notImplemented()
+                          }
+                      }
+              }
+              @RequiresApi(30)
+              private fun captureAsync(svc: JarvisAccessibilityService,
+                                       result: MethodChannel.Result) {
+                  svc.captureScreenshot { bmp ->
+                      if (bmp == null) {
+                          result.error("FAIL", "null", null)
+                          return@captureScreenshot
+                      }
+                      try {
+                          val max = 1024
+                          val sc = max.toFloat() / maxOf(bmp.width, bmp.height)
+                          val s = if (sc >= 1f) bmp else Bitmap.createScaledBitmap(
+                              bmp, (bmp.width*sc).toInt(), (bmp.height*sc).toInt(), true)
+                          val bos = ByteArrayOutputStream()
+                          s.compress(Bitmap.CompressFormat.JPEG, 70, bos)
+                          result.success(mapOf(
+                              "base64" to Base64.encodeToString(
+                                  bos.toByteArray(), Base64.NO_WRAP),
+                              "imageWidth" to s.width,
+                              "imageHeight" to s.height,
+                              "screenWidth" to bmp.width,
+                              "screenHeight" to bmp.height))
+                      } catch (e: Exception) {
+                          result.error("ENC", e.message, null)
+                      }
+                  }
+              }
+          }
+          KT_EOF
+
+          cat > "$KT/JarvisAccessibilityService.kt" << 'KT_EOF'
+          package com.example.jarvis
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Bitmap
+          import android.graphics.Path
+          import android.graphics.Rect
+          import android.os.Build
+          import android.os.Bundle
+          import android.util.Log
+          import android.view.Display
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import androidx.annotation.RequiresApi
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.util.concurrent.atomic.AtomicBoolean
+
+          class JarvisAccessibilityService : AccessibilityService() {
+              companion object {
+                  @Volatile var instance: JarvisAccessibilityService? = null
+                  val killSwitch = AtomicBoolean(false)
+              }
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+                  Log.i("Jarvis", "Connected")
+              }
+              override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+              override fun onDestroy() { instance = null; super.onDestroy() }
+
+              fun getPrunedTree(): String {
+                  val root = rootInActiveWindow ?: return "[]"
+                  val nodes = mutableListOf<JSONObject>()
+                  walk(root, 0, nodes)
+                  return JSONArray(nodes as List<Any>).toString()
+              }
+              private fun walk(n: AccessibilityNodeInfo?, d: Int,
+                               out: MutableList<JSONObject>) {
+                  if (n == null || d > 12 || out.size >= 150) return
+                  if (!n.isVisibleToUser) return
+                  val r = Rect().also { n.getBoundsInScreen(it) }
+                  if (r.width() <= 0 || r.height() <= 0) return
+                  val hasText = !n.text.isNullOrBlank()
+                      || !n.contentDescription.isNullOrBlank()
+                  val act = n.isClickable || n.isEditable || n.isScrollable
+                  if (hasText || act) {
+                      out.add(JSONObject().apply {
+                          put("i", out.size)
+                          put("cls", n.className?.toString()?.substringAfterLast('.') ?: "")
+                          put("text", n.text?.toString()?.take(80) ?: "")
+                          put("desc", n.contentDescription?.toString()?.take(80) ?: "")
+                          put("b", JSONArray(listOf(r.left,r.top,r.right,r.bottom)))
+                          put("clickable", n.isClickable)
+                          put("editable", n.isEditable)
+                          put("scrollable", n.isScrollable)
+                          put("enabled", n.isEnabled)
+                      })
+                  }
+                  for (i in 0 until n.childCount) walk(n.getChild(i), d+1, out)
+              }
+
+              @RequiresApi(Build.VERSION_CODES.R)
+              fun captureScreenshot(cb: (Bitmap?) -> Unit) {
+                  if (killSwitch.get()) { cb(null); return }
+                  takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor,
+                      object : TakeScreenshotCallback {
+                          override fun onSuccess(r: ScreenshotResult) {
+                              val b = Bitmap.wrapHardwareBuffer(
+                                  r.hardwareBuffer, r.colorSpace)
+                              val c = b?.copy(Bitmap.Config.ARGB_8888, false)
+                              r.hardwareBuffer.close()
+                              cb(c)
+                          }
+                          override fun onFailure(e: Int) {
+                              Log.e("Jarvis", "screenshot fail $e")
+                              cb(null)
+                          }
+                      })
+              }
+
+              fun tapScreen(x: Float, y: Float, cb: ((Boolean) -> Unit)?) {
+                  if (killSwitch.get()) { cb?.invoke(false); return }
+                  val p = Path().apply { moveTo(x, y) }
+                  val g = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(p, 0, 60))
+                      .build()
+                  dispatchGesture(g, object : GestureResultCallback() {
+                      override fun onCompleted(g: GestureDescription?) { cb?.invoke(true) }
+                      override fun onCancelled(g: GestureDescription?) { cb?.invoke(false) }
+                  }, null)
+              }
+
+              fun swipeScreen(x1: Float, y1: Float, x2: Float, y2: Float,
+                              dur: Long, cb: ((Boolean) -> Unit)?) {
+                  if (killSwitch.get()) { cb?.invoke(false); return }
+                  val p = Path().apply { moveTo(x1,y1); lineTo(x2,y2) }
+                  val g = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(p, 0, dur))
+                      .build()
+                  dispatchGesture(g, object : GestureResultCallback() {
+                      override fun onCompleted(g: GestureDescription?) { cb?.invoke(true) }
+                      override fun onCancelled(g: GestureDescription?) { cb?.invoke(false) }
+                  }, null)
+              }
+
+              fun goBack() = if (killSwitch.get()) false
+                  else performGlobalAction(GLOBAL_ACTION_BACK)
+              fun goHome() = if (killSwitch.get()) false
+                  else performGlobalAction(GLOBAL_ACTION_HOME)
+
+              fun typeText(t: String, idx: Int): Boolean {
+                  if (killSwitch.get()) return false
+                  if (idx >= 0) {
+                      val n = findNode(idx)
+                      if (n != null && n.isEditable) {
+                          n.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                          if (setText(n, t)) return true
+                      }
+                  }
+                  val f = rootInActiveWindow?.findFocus(
+                      AccessibilityNodeInfo.FOCUS_INPUT)
+                  if (f != null && f.isEditable && setText(f, t)) return true
+                  return false
+              }
+              private fun setText(n: AccessibilityNodeInfo, t: String): Boolean {
+                  val a = Bundle().apply {
+                      putCharSequence(
+                          AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, t)
+                  }
+                  return n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a)
+              }
+              private fun findNode(target: Int): AccessibilityNodeInfo? {
+                  var c = 0; var found: AccessibilityNodeInfo? = null
+                  fun search(n: AccessibilityNodeInfo?, d: Int) {
+                      if (n == null || d > 12 || found != null) return
+                      if (!n.isVisibleToUser) return
+                      val r = Rect().also { n.getBoundsInScreen(it) }
+                      if (r.width() <= 0 || r.height() <= 0) return
+                      val h = !n.text.isNullOrBlank()
+                          || !n.contentDescription.isNullOrBlank()
+                      val a = n.isClickable || n.isEditable || n.isScrollable
+                      if (h || a) {
+                          if (c == target) { found = n; return }
+                          c++
+                      }
+                      for (i in 0 until n.childCount) search(n.getChild(i), d+1)
+                  }
+                  search(rootInActiveWindow, 0)
+                  return found
+              }
+          }
+          KT_EOF
+
+          cat > "$KT/JarvisForegroundService.kt" << 'KT_EOF'
+          package com.example.jarvis
+          import android.app.*
+          import android.content.Intent
+          import android.os.Build
+          import android.os.IBinder
+          import androidx.core.app.NotificationCompat
+
+          class JarvisForegroundService : Service() {
+              companion object { const val CH = "jarvis"; const val ID = 1001 }
+              override fun onCreate() { super.onCreate()
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      getSystemService(NotificationManager::class.java)
+                          .createNotificationChannel(NotificationChannel(
+                              CH, "Jarvis", NotificationManager.IMPORTANCE_LOW))
+                  }
+              }
+              override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
+                  val stop = PendingIntent.getBroadcast(this, 0,
+                      Intent(this, StopReceiver::class.java).apply {
+                          action = "STOP_JARVIS"
+                      }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                  val n = NotificationCompat.Builder(this, CH)
+                      .setContentTitle("Jarvis chal raha hai")
+                      .setContentText("Screen dekhi ja rahi hai")
+                      .setSmallIcon(android.R.drawable.ic_menu_view)
+                      .setOngoing(true)
+                      .addAction(android.R.drawable.ic_delete,
+                          "🛑 STOP JARVIS", stop)
+                      .build()
+                  startForeground(ID, n)
+                  return START_STICKY
+              }
+              override fun onBind(i: Intent?): IBinder? = null
+          }
+          KT_EOF
+
+          cat > "$KT/StopReceiver.kt" << 'KT_EOF'
+          package com.example.jarvis
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          class StopReceiver : BroadcastReceiver() {
+              override fun onReceive(c: Context, i: Intent) {
+                  if (i.action == "STOP_JARVIS") {
+                      JarvisAccessibilityService.killSwitch.set(true)
+                      c.stopService(Intent(c, JarvisForegroundService::class.java))
+                  }
+              }
+          }
+          KT_EOF
+
+          cat > android/app/src/main/res/xml/accessibility_service_config.xml << 'XML_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeAllMask"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
+              android:canPerformGestures="true"
+              android:canRetrieveWindowContent="true"
+              android:canTakeScreenshot="true"
+              android:description="@string/accessibility_desc"
+              android:notificationTimeout="100" />
+          XML_EOF
+
+          cat > android/app/src/main/res/values/strings.xml << 'XML_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Jarvis</string>
+              <string name="accessibility_desc">Jarvis ko screen dekhne ki anumati deta hai. Sirf aapke phone pe.</string>
+          </resources>
+          XML_EOF
+
+          cat > android/app/src/main/AndroidManifest.xml << 'XML_EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="Jarvis"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                          android:name="io.flutter.embedding.android.NormalTheme"
+                          android:resource="@style/NormalTheme" />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".JarvisAccessibilityService"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+                  <service
+                      android:name=".JarvisForegroundService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="ui_automation" />
+                  </service>
+                  <receiver
+                      android:name=".StopReceiver"
+                      android:exported="false" />
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.PROCESS_TEXT"/>
+                      <data android:mimeType="text/plain"/>
+                  </intent>
+              </queries>
+          </manifest>
+          XML_EOF
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 30
