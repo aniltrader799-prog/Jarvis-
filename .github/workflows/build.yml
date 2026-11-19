@@ -26,11 +26,10 @@ jobs:
           channel: 'stable'
           cache: true
 
-      # 1. सीधे मुख्य फोल्डर में ही प्रोजेक्ट बनाएं
       - name: Create Flutter project
         run: flutter create --org com.example --project-name jarvis --platforms android .
 
-      # 2. अपनी pubspec.yaml फ़ाइल लिखें (यह पक्का करेगा कि फाइल मौजूद है)
+      # 1. pubspec.yaml लिखें (speech_to_text का वर्ज़न 5.6.0 पिन करें)
       - name: Write pubspec.yaml
         run: |
           cat << 'EOF' > pubspec.yaml
@@ -47,14 +46,17 @@ jobs:
               sdk: flutter
             http: ^1.2.0
             flutter_secure_storage: ^9.2.2
-            speech_to_text: ^7.0.0
             flutter_tts: ^4.0.2
+            speech_to_text: 5.6.0
+
+          dependency_overrides:
+            speech_to_text: 5.6.0
 
           flutter:
             uses-material-design: true
           EOF
 
-      # 3. अपनी lib/main.dart फ़ाइल लिखें
+      # 2. lib/main.dart लिखें
       - name: Write lib/main.dart
         run: |
           mkdir -p lib
@@ -481,7 +483,7 @@ jobs:
           }
           EOF
 
-      # 4. अपनी कस्टम Android फ़ाइलें लिखें
+      # 3. custom Android files
       - name: Write custom Android files
         run: |
           KT=android/app/src/main/kotlin/com/example/jarvis
@@ -777,6 +779,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
               <application android:label="Jarvis" android:name="${applicationName}" android:icon="@mipmap/ic_launcher">
                   <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:theme="@style/LaunchTheme" android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode" android:hardwareAccelerated="true" android:windowSoftInputMode="adjustResize">
                       <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme" />
@@ -802,19 +805,19 @@ jobs:
                       <action android:name="android.intent.action.PROCESS_TEXT"/>
                       <data android:mimeType="text/plain"/>
                   </intent>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
               </queries>
           </manifest>
           EOF
 
-      # 5. डिपेंडेंसी इंस्टॉल करें
       - name: Get dependencies
         run: flutter pub get
 
-      # 6. APK बिल्ड करें
       - name: Build APK
         run: flutter build apk --debug
 
-      # 7. APK अपलोड करें
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
