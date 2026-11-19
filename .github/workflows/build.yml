@@ -29,6 +29,10 @@ jobs:
       - name: Create Flutter project
         run: flutter create --org com.example --project-name jarvis --platforms android .
 
+      # 1. aapt2 बग को ठीक करने के लिए gradle.properties में वर्ज़न सेट करें
+      - name: Fix aapt2 bug in gradle.properties
+        run: echo "android.aapt2Version=8.6.1-11315950" >> android/gradle.properties
+
       - name: Write pubspec.yaml
         run: |
           cat << 'EOF' > pubspec.yaml
@@ -55,6 +59,7 @@ jobs:
             uses-material-design: true
           EOF
 
+      # 2. Android build.gradle में AGP और Gradle वर्ज़न अपडेट करें
       - name: Write android/build.gradle
         run: |
           cat << 'EOF' > android/build.gradle
@@ -65,7 +70,7 @@ jobs:
                   mavenCentral()
               }
               dependencies {
-                  classpath 'com.android.tools.build:gradle:8.3.0'
+                  classpath 'com.android.tools.build:gradle:8.4.2'
                   classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
               }
           }
@@ -90,7 +95,6 @@ jobs:
           }
           EOF
 
-      # 4. यहाँ minSdkVersion को 21 से बदलकर 24 कर दिया गया है
       - name: Write android/app/build.gradle
         run: |
           cat << 'EOF' > android/app/build.gradle
@@ -156,6 +160,7 @@ jobs:
           }
           EOF
 
+      # 3. lib/main.dart लिखें
       - name: Write lib/main.dart
         run: |
           mkdir -p lib
@@ -582,6 +587,7 @@ jobs:
           }
           EOF
 
+      # 4. कस्टम Android फ़ाइलें लिखें
       - name: Write custom Android files
         run: |
           KT=android/app/src/main/kotlin/com/example/jarvis
@@ -910,12 +916,15 @@ jobs:
           </manifest>
           EOF
 
+      # 5. डिपेंडेंसी इंस्टॉल करें
       - name: Get dependencies
         run: flutter pub get
 
+      # 6. APK बिल्ड करें
       - name: Build APK
         run: flutter build apk --debug
 
+      # 7. APK अपलोड करें
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
