@@ -26,12 +26,17 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Create Flutter project
-        run: |
-          if [ ! -f android/build.gradle ]; then
-            flutter create --org com.example --project-name jarvis --platforms android .
-          fi
+      # 1. अस्थायी फ़ोल्डर में Flutter प्रोजेक्ट बनाएं ताकि आपकी pubspec.yaml सुरक्षित रहे
+      - name: Create Flutter project in temp
+        run: flutter create --org com.example --project-name jarvis --platforms android temp_project
 
+      # 2. सिर्फ़ Android फ़ोल्डर को मुख्य फ़ोल्डर में कॉपी करें
+      - name: Copy Android folder
+        run: |
+          cp -r temp_project/android .
+          rm -rf temp_project
+
+      # 3. अपनी कस्टम Android फ़ाइलें लिखें
       - name: Write custom Android files
         run: |
           set -e
@@ -62,8 +67,7 @@ jobs:
                       .setMethodCallHandler { call, result ->
                           val svc = JarvisAccessibilityService.instance
                           if (svc == null) {
-                              result.error("NO_SERVICE",
-                                  "Accessibility OFF", null)
+                              result.error("NO_SERVICE", "Accessibility OFF", null)
                               return@setMethodCallHandler
                           }
                           when (call.method) {
