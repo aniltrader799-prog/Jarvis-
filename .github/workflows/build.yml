@@ -90,6 +90,7 @@ jobs:
           }
           EOF
 
+      # 4. यहाँ minSdkVersion को 21 से बदलकर 24 कर दिया गया है
       - name: Write android/app/build.gradle
         run: |
           cat << 'EOF' > android/app/build.gradle
@@ -137,7 +138,7 @@ jobs:
 
               defaultConfig {
                   applicationId "com.example.jarvis"
-                  minSdkVersion 21
+                  minSdkVersion 24
                   targetSdkVersion 34
                   versionCode flutterVersionCode.toInteger()
                   versionName flutterVersionName
@@ -155,7 +156,6 @@ jobs:
           }
           EOF
 
-      # 5. lib/main.dart लिखें (यहाँ 'screenshot' वाला एरर फिक्स कर दिया गया है)
       - name: Write lib/main.dart
         run: |
           mkdir -p lib
@@ -259,8 +259,6 @@ jobs:
             final String apiKey, model, lang;
             Gemini({required this.apiKey, this.model = 'gemini-2.5-flash',
                     this.lang = 'hi-IN'});
-            
-            // यहाँ 'shot' की जगह 'screenshot' कर दिया गया है
             Future<JarvisAction> decide({
               required String goal, required Shot? screenshot,
               required String tree, required List<String> history,
@@ -279,8 +277,6 @@ jobs:
           5. action="done" only when goal achieved.
           Return ONLY valid JSON.''';
               final parts = <Map<String, dynamic>>[{'text': prompt}];
-              
-              // यहाँ भी 'shot' की जगह 'screenshot' कर दिया गया है
               if (screenshot != null) parts.add({
                 'inline_data': {'mime_type': 'image/jpeg', 'data': screenshot.base64}
               });
