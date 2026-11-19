@@ -29,7 +29,6 @@ jobs:
       - name: Create Flutter project
         run: flutter create --org com.example --project-name jarvis --platforms android .
 
-      # 1. Gradle वर्ज़न को 8.5 पर अपडेट करें
       - name: Update Gradle version
         run: |
           cat << 'EOF' > android/gradle/wrapper/gradle-wrapper.properties
@@ -178,7 +177,7 @@ jobs:
               sdk: flutter
             http: ^1.2.0
             flutter_secure_storage: ^9.2.2
-            flutter_tts: ^4.0.2
+            flutter_tts: 4.0.2
             speech_to_text: 7.0.0
 
           dependency_overrides:
@@ -186,14 +185,303 @@ jobs:
 
           flutter:
             uses-material-design: true
-          EOF       - name: Pin flutter_tts version
-        run: sed -i 's/flutter_tts: ^4.0.2/flutter_tts: 4.0.2/' pubspec.yaml
+          EOF
+
+      - name: Write Android manifest and resources
+        run: |
+          mkdir -p android/app/src/main/kotlin/com/example/jarvis
+          mkdir -p android/app/src/main/res/xml
+          mkdir -p android/app/src/main/res/values
+          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService"/>
+                  </intent>
+              </queries>
+              <application
+                  android:label="Jarvis"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                          android:name="io.flutter.embedding.android.NormalTheme"
+                          android:resource="@style/NormalTheme"/>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data android:name="flutterEmbedding" android:value="2"/>
+                  <service
+                      android:name=".JarvisAccessibilityService"
+                      android:exported="true"
+                      android:label="Jarvis"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          cat << 'EOF' > android/app/src/main/res/xml/accessibility_service_config.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeAllMask"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+              android:canRetrieveWindowContent="true"
+              android:canPerformGestures="true"
+              android:canTakeScreenshot="true"
+              android:description="@string/jarvis_a11y_desc"
+              android:notificationTimeout="100" />
+          EOF
+          cat << 'EOF' > android/app/src/main/res/values/jarvis_strings.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="jarvis_a11y_desc">Jarvis screen automation</string>
+          </resources>
+          EOF
+
+      - name: Write Kotlin native code
+        run: |
+          cat << 'EOF' > android/app/src/main/kotlin/com/example/jarvis/JarvisAccessibilityService.kt
+          package com.example.jarvis
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Bitmap
+          import android.graphics.Path
+          import android.graphics.Rect
+          import android.os.Build
+          import android.os.Bundle
+          import android.util.Base64
+          import android.view.Display
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.ByteArrayOutputStream
+
+          class JarvisAccessibilityService : AccessibilityService() {
+              companion object {
+                  @Volatile var instance: JarvisAccessibilityService? = null
+                  @Volatile var killed: Boolean = false
+              }
+
+              private val nodes = ArrayList<AccessibilityNodeInfo>()
+
+              override fun onServiceConnected() {
+                  instance = this
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {}
+
+              override fun onDestroy() {
+                  instance = null
+                  super.onDestroy()
+              }
+
+              fun uiTree(): String {
+                  nodes.clear()
+                  val arr = JSONArray()
+                  val root = rootInActiveWindow ?: return "[]"
+                  walk(root, arr)
+                  return arr.toString()
+              }
+
+              private fun walk(n: AccessibilityNodeInfo, arr: JSONArray) {
+                  if (arr.length() >= 120) return
+                  val text = n.text?.toString() ?: n.contentDescription?.toString() ?: ""
+                  if (text.isNotEmpty() || n.isClickable || n.isEditable) {
+                      val r = Rect()
+                      n.getBoundsInScreen(r)
+                      val o = JSONObject()
+                      o.put("i", nodes.size)
+                      o.put("text", if (text.length > 60) text.substring(0, 60) else text)
+                      o.put("click", n.isClickable)
+                      o.put("edit", n.isEditable)
+                      o.put("cx", r.centerX())
+                      o.put("cy", r.centerY())
+                      arr.put(o)
+                      nodes.add(n)
+                  }
+                  for (i in 0 until n.childCount) {
+                      val c = n.getChild(i) ?: continue
+                      walk(c, arr)
+                  }
+              }
+
+              fun gesture(x1: Float, y1: Float, x2: Float, y2: Float, dur: Long): Boolean {
+                  val p = Path()
+                  p.moveTo(x1, y1)
+                  if (x1 != x2 || y1 != y2) p.lineTo(x2, y2)
+                  val stroke = GestureDescription.StrokeDescription(p, 0L, if (dur < 1L) 1L else dur)
+                  val g = GestureDescription.Builder().addStroke(stroke).build()
+                  return dispatchGesture(g, null, null)
+              }
+
+              fun tapNode(idx: Int): Boolean {
+                  if (idx < 0 || idx >= nodes.size) return false
+                  val n = nodes[idx]
+                  var cur: AccessibilityNodeInfo? = n
+                  while (cur != null) {
+                      if (cur.isClickable && cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                      cur = cur.parent
+                  }
+                  val r = Rect()
+                  n.getBoundsInScreen(r)
+                  return gesture(r.centerX().toFloat(), r.centerY().toFloat(),
+                      r.centerX().toFloat(), r.centerY().toFloat(), 50L)
+              }
+
+              fun typeText(t: String, idx: Int): Boolean {
+                  val node: AccessibilityNodeInfo? =
+                      if (idx >= 0 && idx < nodes.size) nodes[idx]
+                      else rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                  if (node == null) return false
+                  val b = Bundle()
+                  b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, t)
+                  return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b)
+              }
+
+              fun screenshot(cb: (Map<String, Any>?) -> Unit) {
+                  if (Build.VERSION.SDK_INT < 30) {
+                      cb(null)
+                      return
+                  }
+                  takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor,
+                      object : AccessibilityService.TakeScreenshotCallback {
+                          override fun onSuccess(r: AccessibilityService.ScreenshotResult) {
+                              try {
+                                  val hw = Bitmap.wrapHardwareBuffer(r.hardwareBuffer, r.colorSpace)
+                                  val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                                  r.hardwareBuffer.close()
+                                  if (bmp == null) {
+                                      cb(null)
+                                      return
+                                  }
+                                  val w = 540
+                                  val h = bmp.height * w / bmp.width
+                                  val sm = Bitmap.createScaledBitmap(bmp, w, h, true)
+                                  val bos = ByteArrayOutputStream()
+                                  sm.compress(Bitmap.CompressFormat.JPEG, 60, bos)
+                                  val dm = resources.displayMetrics
+                                  cb(mapOf(
+                                      "base64" to Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP),
+                                      "imageWidth" to w,
+                                      "imageHeight" to h,
+                                      "screenWidth" to dm.widthPixels,
+                                      "screenHeight" to dm.heightPixels
+                                  ))
+                              } catch (e: Exception) {
+                                  cb(null)
+                              }
+                          }
+
+                          override fun onFailure(errorCode: Int) {
+                              cb(null)
+                          }
+                      })
+              }
+          }
+          EOF
+          cat << 'EOF' > android/app/src/main/kotlin/com/example/jarvis/MainActivity.kt
+          package com.example.jarvis
+
+          import android.content.Intent
+          import android.provider.Settings
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "jarvis/native")
+                      .setMethodCallHandler { call, result ->
+                          val s = JarvisAccessibilityService.instance
+                          when (call.method) {
+                              "getUiTree" -> result.success(s?.uiTree() ?: "[]")
+                              "captureScreenshot" -> {
+                                  if (s == null) {
+                                      result.error("NO_SERVICE", "Accessibility service is off", null)
+                                  } else {
+                                      s.screenshot { m ->
+                                          if (m == null) result.error("FAIL", "Screenshot failed", null)
+                                          else result.success(m)
+                                      }
+                                  }
+                              }
+                              "tap" -> {
+                                  val x = (call.argument<Double>("x") ?: 0.0).toFloat()
+                                  val y = (call.argument<Double>("y") ?: 0.0).toFloat()
+                                  result.success(s?.gesture(x, y, x, y, 50L) ?: false)
+                              }
+                              "tapNode" -> {
+                                  val i = call.argument<Int>("index") ?: -1
+                                  result.success(s?.tapNode(i) ?: false)
+                              }
+                              "swipe" -> {
+                                  val x1 = (call.argument<Double>("x1") ?: 0.0).toFloat()
+                                  val y1 = (call.argument<Double>("y1") ?: 0.0).toFloat()
+                                  val x2 = (call.argument<Double>("x2") ?: 0.0).toFloat()
+                                  val y2 = (call.argument<Double>("y2") ?: 0.0).toFloat()
+                                  val d = (call.argument<Int>("durationMs") ?: 300).toLong()
+                                  result.success(s?.gesture(x1, y1, x2, y2, d) ?: false)
+                              }
+                              "back" -> result.success(
+                                  s?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK) ?: false)
+                              "home" -> result.success(
+                                  s?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME) ?: false)
+                              "type" -> {
+                                  val t = call.argument<String>("text") ?: ""
+                                  val i = call.argument<Int>("nodeIndex") ?: -1
+                                  result.success(s?.typeText(t, i) ?: false)
+                              }
+                              "isKillSwitchActive" -> result.success(JarvisAccessibilityService.killed)
+                              "resetKillSwitch" -> {
+                                  JarvisAccessibilityService.killed = false
+                                  result.success(true)
+                              }
+                              "killSwitch" -> {
+                                  JarvisAccessibilityService.killed = true
+                                  result.success(true)
+                              }
+                              "startForegroundService" -> result.success(true)
+                              "stopForegroundService" -> result.success(true)
+                              "openAccessibility" -> {
+                                  val i = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                  startActivity(i)
+                                  result.success(true)
+                              }
+                              else -> result.notImplemented()
+                          }
+                      }
+              }
+          }
+          EOF
 
       - name: Write lib/main.dart
         run: |
           mkdir -p lib
           cat << 'EOF' > lib/main.dart
-          import 'dart:async';
           import 'dart:convert';
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
@@ -229,6 +517,8 @@ jobs:
             }
             static Future<bool> tap(double x, double y) async =>
                 await _ch.invokeMethod<bool>('tap', {'x': x, 'y': y}) ?? false;
+            static Future<bool> tapNode(int i) async =>
+                await _ch.invokeMethod<bool>('tapNode', {'index': i}) ?? false;
             static Future<bool> swipe(double a, double b, double c, double d) async =>
                 await _ch.invokeMethod<bool>('swipe',
                   {'x1': a, 'y1': b, 'x2': c, 'y2': d, 'durationMs': 300}) ?? false;
@@ -242,10 +532,14 @@ jobs:
                 await _ch.invokeMethod<bool>('isKillSwitchActive') ?? true;
             static Future<void> resetKill() async =>
                 _ch.invokeMethod('resetKillSwitch');
+            static Future<void> kill() async =>
+                _ch.invokeMethod('killSwitch');
             static Future<void> startFGS() async =>
                 _ch.invokeMethod('startForegroundService');
             static Future<void> stopFGS() async =>
                 _ch.invokeMethod('stopForegroundService');
+            static Future<void> openAccessibility() async =>
+                _ch.invokeMethod('openAccessibility');
           }
 
           class Shot {
@@ -419,17 +713,17 @@ jobs:
                   }
 
                   if (action.needsConfirm) {
-                    onT(TEntry(TType.warn, '⚠️ Confirm', action.confirmQ ?? '?'));
+                    onT(TEntry(TType.warn, 'Confirm', action.confirmQ ?? '?'));
                     final ok = await onConfirm(action.confirmQ ?? 'Aage badhein?');
                     if (!ok) { await onSpeak('Cancel kiya.'); return; }
                   }
 
                   final done = await _exec(action, shot);
-                  history.add('$step:${action.action} — ${action.reason}');
+                  history.add('$step:${action.action} - ${action.reason}');
                   onT(TEntry(TType.action, 'Step $step: ${action.action}', action.reason));
 
                   if (done) {
-                    onT(TEntry(TType.result, '✅ Done', action.spoken));
+                    onT(TEntry(TType.result, 'Done', action.spoken));
                     await onSpeak(action.spoken);
                     return;
                   }
@@ -452,6 +746,10 @@ jobs:
               }
               switch (a.action) {
                 case 'tap':
+                  if (a.tIndex != null) {
+                    await NativeBridge.tapNode(a.tIndex!);
+                    return false;
+                  }
                   if (sx == null) return false;
                   await NativeBridge.tap(sx, sy!);
                   return false;
@@ -503,7 +801,7 @@ jobs:
                 context: context,
                 builder: (ctx) => AlertDialog(
                   title: const Text('Gemini API Key'),
-                  content: TextField(controller: c, decoration: const InputDecoration(hintText: 'AIza…')),
+                  content: TextField(controller: c, decoration: const InputDecoration(hintText: 'AIza...')),
                   actions: [TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('Save'))],
                 ),
               );
@@ -520,41 +818,47 @@ jobs:
               await _stt.listen(
                 localeId: _lang,
                 onResult: (r) {
+                  setState(() => _goal.text = r.recognizedWords);
                   if (r.finalResult) {
-                    _goal.text = r.recognizedWords;
                     setState(() => _listening = false);
+                    _run();
                   }
                 },
               );
             }
 
+            Future<bool> _confirm(String q) async {
+              final r = await showDialog<bool>(
+                context: context,
+                barrierDismissible: false,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('Confirm'),
+                  content: Text(q),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('No')),
+                    TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Yes')),
+                  ],
+                ),
+              );
+              return r ?? false;
+            }
+
             Future<void> _run() async {
-              final g = _goal.text.trim();
-              if (g.isEmpty || _key == null) return;
+              final goal = _goal.text.trim();
+              if (goal.isEmpty || _key == null || _running) return;
               setState(() { _running = true; _entries.clear(); });
               await _tts.setLanguage(_lang);
-
               final loop = AgentLoop(
                 gemini: Gemini(apiKey: _key!, lang: _lang),
-                onT: (e) { if (mounted) setState(() => _entries.add(e)); },
-                onSpeak: (s) async => await _tts.speak(s),
-                onConfirm: (q) async {
-                  await _tts.speak(q);
-                  return await showDialog<bool>(
-                    context: context,
-                    builder: (ctx) => AlertDialog(
-                      title: const Text('⚠️ Confirm'),
-                      content: Text(q),
-                      actions: [
-                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-                        ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Haan')),
-                      ],
-                    ),
-                  ) ?? false;
-                },
+                onT: (e) { if (mounted) setState(() => _entries.insert(0, e)); },
+                onSpeak: (t) async { await _tts.speak(t); },
+                onConfirm: _confirm,
               );
-              await loop.run(g);
-              if (mounted) setState(() => _running = false);
+              try {
+                await loop.run(goal);
+              } finally {
+                if (mounted) setState(() => _running = false);
+              }
             }
 
             @override
@@ -563,387 +867,75 @@ jobs:
                 appBar: AppBar(
                   title: const Text('Jarvis'),
                   actions: [
-                    DropdownButton<String>(
-                      value: _lang,
-                      onChanged: (v) => setState(() => _lang = v!),
-                      items: const [
-                        DropdownMenuItem(value: 'en-US', child: Text('EN')),
-                        DropdownMenuItem(value: 'hi-IN', child: Text('हि')),
-                        DropdownMenuItem(value: 'or-IN', child: Text('ଓ')),
+                    IconButton(icon: const Icon(Icons.vpn_key), onPressed: _askKey),
+                    IconButton(icon: const Icon(Icons.accessibility_new), onPressed: NativeBridge.openAccessibility),
+                    PopupMenuButton<String>(
+                      initialValue: _lang,
+                      onSelected: (v) => setState(() => _lang = v),
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'hi-IN', child: Text('Hindi')),
+                        PopupMenuItem(value: 'en-US', child: Text('English')),
+                        PopupMenuItem(value: 'or-IN', child: Text('Odia')),
                       ],
                     ),
-                    IconButton(icon: const Icon(Icons.key), onPressed: _askKey),
                   ],
                 ),
-                body: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Row(children: [
-                        Expanded(child: TextField(
-                          controller: _goal,
-                          decoration: const InputDecoration(hintText: 'Kya karna hai?', border: OutlineInputBorder()),
-                        )),
-                        IconButton.filled(onPressed: _listening ? null : _voice, icon: Icon(_listening ? Icons.mic : Icons.mic_none)),
-                        IconButton.filled(onPressed: _running ? null : _run, icon: const Icon(Icons.play_arrow)),
-                      ]),
-                    ),
-                    if (_running) const LinearProgressIndicator(),
-                    Expanded(
-                      child: ListView.builder(
-                        padding: const EdgeInsets.all(8),
-                        itemCount: _entries.length,
-                        itemBuilder: (ctx, i) {
-                          final e = _entries[i];
-                          final c = switch (e.type) {
-                            TType.observe => Colors.blue.shade100,
-                            TType.action => Colors.green.shade100,
-                            TType.warn => Colors.orange.shade100,
-                            TType.result => Colors.purple.shade100,
-                          };
-                          return Card(color: c, child: ListTile(
-                            title: Text(e.title, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87)),
-                            subtitle: Text(e.detail, style: const TextStyle(color: Colors.black54)),
-                          ));
-                        },
+                body: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    children: [
+                      TextField(
+                        controller: _goal,
+                        decoration: const InputDecoration(
+                          hintText: 'Kya karna hai?',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: _running ? null : _run,
+                              child: Text(_running ? 'Chal raha hai...' : 'Start'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton.filled(
+                            onPressed: _running ? null : _voice,
+                            icon: Icon(_listening ? Icons.mic : Icons.mic_none),
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton.filled(
+                            style: IconButton.styleFrom(backgroundColor: Colors.red),
+                            onPressed: NativeBridge.kill,
+                            icon: const Icon(Icons.stop),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: ListView.builder(
+                          itemCount: _entries.length,
+                          itemBuilder: (_, i) {
+                            final e = _entries[i];
+                            return ListTile(
+                              dense: true,
+                              title: Text(e.title),
+                              subtitle: Text(e.detail),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               );
             }
           }
           EOF
 
-      - name: Write custom Android files
-        run: |
-          KT=android/app/src/main/kotlin/com/example/jarvis
-          mkdir -p "$KT"
-          mkdir -p android/app/src/main/res/xml
-          mkdir -p android/app/src/main/res/values
-
-          cat << 'EOF' > "$KT/MainActivity.kt"
-          package com.example.jarvis
-          import android.content.Intent
-          import android.graphics.Bitmap
-          import android.os.Build
-          import android.util.Base64
-          import androidx.annotation.RequiresApi
-          import io.flutter.embedding.android.FlutterActivity
-          import io.flutter.embedding.engine.FlutterEngine
-          import io.flutter.plugin.common.MethodChannel
-          import java.io.ByteArrayOutputStream
-          import java.util.concurrent.CountDownLatch
-          import java.util.concurrent.TimeUnit
-
-          class MainActivity : FlutterActivity() {
-              private val CHANNEL = "jarvis/native"
-              override fun configureFlutterEngine(engine: FlutterEngine) {
-                  super.configureFlutterEngine(engine)
-                  MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
-                      .setMethodCallHandler { call, result ->
-                          val svc = JarvisAccessibilityService.instance
-                          if (svc == null) {
-                              result.error("NO_SERVICE", "Accessibility OFF", null)
-                              return@setMethodCallHandler
-                          }
-                          when (call.method) {
-                              "getUiTree" -> try { result.success(svc.getPrunedTree()) } catch (e: Exception) { result.error("TREE", e.message, null) }
-                              "captureScreenshot" -> {
-                                  if (Build.VERSION.SDK_INT < 30) { result.error("OLD", "Need Android 11+", null); return@setMethodCallHandler }
-                                  captureAsync(svc, result)
-                              }
-                              "tap" -> {
-                                  val x = (call.argument<Double>("x") ?: 0.0).toFloat()
-                                  val y = (call.argument<Double>("y") ?: 0.0).toFloat()
-                                  val latch = CountDownLatch(1)
-                                  var ok = false
-                                  svc.tapScreen(x, y) { s -> ok = s; latch.countDown() }
-                                  latch.await(2, TimeUnit.SECONDS)
-                                  result.success(ok)
-                              }
-                              "swipe" -> {
-                                  val a = (call.argument<Double>("x1")?:0.0).toFloat()
-                                  val b = (call.argument<Double>("y1")?:0.0).toFloat()
-                                  val c = (call.argument<Double>("x2")?:0.0).toFloat()
-                                  val d = (call.argument<Double>("y2")?:0.0).toFloat()
-                                  svc.swipeScreen(a,b,c,d,300){ result.success(it) }
-                              }
-                              "back" -> result.success(svc.goBack())
-                              "home" -> result.success(svc.goHome())
-                              "type" -> {
-                                  val t = call.argument<String>("text") ?: ""
-                                  val i = call.argument<Int>("nodeIndex") ?: -1
-                                  result.success(svc.typeText(t, i))
-                              }
-                              "isKillSwitchActive" -> result.success(JarvisAccessibilityService.killSwitch.get())
-                              "resetKillSwitch" -> { JarvisAccessibilityService.killSwitch.set(false); result.success(true) }
-                              "startForegroundService" -> { startService(Intent(this@MainActivity, JarvisForegroundService::class.java)); result.success(true) }
-                              "stopForegroundService" -> { stopService(Intent(this@MainActivity, JarvisForegroundService::class.java)); result.success(true) }
-                              else -> result.notImplemented()
-                          }
-                      }
-              }
-              @RequiresApi(30)
-              private fun captureAsync(svc: JarvisAccessibilityService, result: MethodChannel.Result) {
-                  svc.captureScreenshot { bmp ->
-                      if (bmp == null) { result.error("FAIL", "null", null); return@captureScreenshot }
-                      try {
-                          val max = 1024
-                          val sc = max.toFloat() / maxOf(bmp.width, bmp.height)
-                          val s = if (sc >= 1f) bmp else Bitmap.createScaledBitmap(bmp, (bmp.width*sc).toInt(), (bmp.height*sc).toInt(), true)
-                          val bos = ByteArrayOutputStream()
-                          s.compress(Bitmap.CompressFormat.JPEG, 70, bos)
-                          result.success(mapOf(
-                              "base64" to Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP),
-                              "imageWidth" to s.width, "imageHeight" to s.height,
-                              "screenWidth" to bmp.width, "screenHeight" to bmp.height))
-                      } catch (e: Exception) { result.error("ENC", e.message, null) }
-                  }
-              }
-          }
-          EOF
-
-          cat << 'EOF' > "$KT/JarvisAccessibilityService.kt"
-          package com.example.jarvis
-          import android.accessibilityservice.AccessibilityService
-          import android.accessibilityservice.GestureDescription
-          import android.graphics.Bitmap
-          import android.graphics.Path
-          import android.graphics.Rect
-          import android.os.Build
-          import android.os.Bundle
-          import android.util.Log
-          import android.view.Display
-          import android.view.accessibility.AccessibilityEvent
-          import android.view.accessibility.AccessibilityNodeInfo
-          import androidx.annotation.RequiresApi
-          import org.json.JSONArray
-          import org.json.JSONObject
-          import java.util.concurrent.atomic.AtomicBoolean
-
-          class JarvisAccessibilityService : AccessibilityService() {
-              companion object {
-                  @Volatile var instance: JarvisAccessibilityService? = null
-                  val killSwitch = AtomicBoolean(false)
-              }
-              override fun onServiceConnected() { super.onServiceConnected(); instance = this; Log.i("Jarvis", "Connected") }
-              override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
-              override fun onInterrupt() {}
-              override fun onDestroy() { instance = null; super.onDestroy() }
-
-              fun getPrunedTree(): String {
-                  val root = rootInActiveWindow ?: return "[]"
-                  val nodes = mutableListOf<JSONObject>()
-                  walk(root, 0, nodes)
-                  return JSONArray(nodes as List<Any>).toString()
-              }
-              private fun walk(n: AccessibilityNodeInfo?, d: Int, out: MutableList<JSONObject>) {
-                  if (n == null || d > 12 || out.size >= 150) return
-                  if (!n.isVisibleToUser) return
-                  val r = Rect().also { n.getBoundsInScreen(it) }
-                  if (r.width() <= 0 || r.height() <= 0) return
-                  val hasText = !n.text.isNullOrBlank() || !n.contentDescription.isNullOrBlank()
-                  val act = n.isClickable || n.isEditable || n.isScrollable
-                  if (hasText || act) {
-                      out.add(JSONObject().apply {
-                          put("i", out.size)
-                          put("cls", n.className?.toString()?.substringAfterLast('.') ?: "")
-                          put("text", n.text?.toString()?.take(80) ?: "")
-                          put("desc", n.contentDescription?.toString()?.take(80) ?: "")
-                          put("b", JSONArray(listOf(r.left,r.top,r.right,r.bottom)))
-                          put("clickable", n.isClickable)
-                          put("editable", n.isEditable)
-                          put("scrollable", n.isScrollable)
-                          put("enabled", n.isEnabled)
-                      })
-                  }
-                  for (i in 0 until n.childCount) walk(n.getChild(i), d+1, out)
-              }
-
-              @RequiresApi(Build.VERSION_CODES.R)
-              fun captureScreenshot(cb: (Bitmap?) -> Unit) {
-                  if (killSwitch.get()) { cb(null); return }
-                  takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
-                      override fun onSuccess(r: ScreenshotResult) {
-                          val b = Bitmap.wrapHardwareBuffer(r.hardwareBuffer, r.colorSpace)
-                          val c = b?.copy(Bitmap.Config.ARGB_8888, false)
-                          r.hardwareBuffer.close()
-                          cb(c)
-                      }
-                      override fun onFailure(e: Int) { Log.e("Jarvis", "screenshot fail $e"); cb(null) }
-                  })
-              }
-
-              fun tapScreen(x: Float, y: Float, cb: ((Boolean) -> Unit)?) {
-                  if (killSwitch.get()) { cb?.invoke(false); return }
-                  val p = Path().apply { moveTo(x, y) }
-                  val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build()
-                  dispatchGesture(g, object : GestureResultCallback() {
-                      override fun onCompleted(g: GestureDescription?) { cb?.invoke(true) }
-                      override fun onCancelled(g: GestureDescription?) { cb?.invoke(false) }
-                  }, null)
-              }
-
-              fun swipeScreen(x1: Float, y1: Float, x2: Float, y2: Float, dur: Long, cb: ((Boolean) -> Unit)?) {
-                  if (killSwitch.get()) { cb?.invoke(false); return }
-                  val p = Path().apply { moveTo(x1,y1); lineTo(x2,y2) }
-                  val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, dur)).build()
-                  dispatchGesture(g, object : GestureResultCallback() {
-                      override fun onCompleted(g: GestureDescription?) { cb?.invoke(true) }
-                      override fun onCancelled(g: GestureDescription?) { cb?.invoke(false) }
-                  }, null)
-              }
-
-              fun goBack() = if (killSwitch.get()) false else performGlobalAction(GLOBAL_ACTION_BACK)
-              fun goHome() = if (killSwitch.get()) false else performGlobalAction(GLOBAL_ACTION_HOME)
-
-              fun typeText(t: String, idx: Int): Boolean {
-                  if (killSwitch.get()) return false
-                  if (idx >= 0) {
-                      val n = findNode(idx)
-                      if (n != null && n.isEditable) {
-                          n.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                          if (setText(n, t)) return true
-                      }
-                  }
-                  val f = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-                  if (f != null && f.isEditable && setText(f, t)) return true
-                  return false
-              }
-              private fun setText(n: AccessibilityNodeInfo, t: String): Boolean {
-                  val a = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, t) }
-                  return n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a)
-              }
-              private fun findNode(target: Int): AccessibilityNodeInfo? {
-                  var c = 0; var found: AccessibilityNodeInfo? = null
-                  fun search(n: AccessibilityNodeInfo?, d: Int) {
-                      if (n == null || d > 12 || found != null) return
-                      if (!n.isVisibleToUser) return
-                      val r = Rect().also { n.getBoundsInScreen(it) }
-                      if (r.width() <= 0 || r.height() <= 0) return
-                      val h = !n.text.isNullOrBlank() || !n.contentDescription.isNullOrBlank()
-                      val a = n.isClickable || n.isEditable || n.isScrollable
-                      if (h || a) {
-                          if (c == target) { found = n; return }
-                          c++
-                      }
-                      for (i in 0 until n.childCount) search(n.getChild(i), d+1)
-                  }
-                  search(rootInActiveWindow, 0)
-                  return found
-              }
-          }
-          EOF
-
-          cat << 'EOF' > "$KT/JarvisForegroundService.kt"
-          package com.example.jarvis
-          import android.app.*
-          import android.content.Intent
-          import android.os.Build
-          import android.os.IBinder
-          import androidx.core.app.NotificationCompat
-
-          class JarvisForegroundService : Service() {
-              companion object { const val CH = "jarvis"; const val ID = 1001 }
-              override fun onCreate() {
-                  super.onCreate()
-                  if (Build.VERSION.SDK_INT >= 26) {
-                      getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CH, "Jarvis", NotificationManager.IMPORTANCE_LOW))
-                  }
-              }
-              override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
-                  val stop = PendingIntent.getBroadcast(this, 0, Intent(this, StopReceiver::class.java).apply { action = "STOP_JARVIS" }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-                  val n = NotificationCompat.Builder(this, CH)
-                      .setContentTitle("Jarvis chal raha hai")
-                      .setContentText("Screen dekhi ja rahi hai")
-                      .setSmallIcon(android.R.drawable.ic_menu_view)
-                      .setOngoing(true)
-                      .addAction(android.R.drawable.ic_delete, "🛑 STOP JARVIS", stop)
-                      .build()
-                  startForeground(ID, n)
-                  return START_STICKY
-              }
-              override fun onBind(i: Intent?): IBinder? = null
-          }
-          EOF
-
-          cat << 'EOF' > "$KT/StopReceiver.kt"
-          package com.example.jarvis
-          import android.content.BroadcastReceiver
-          import android.content.Context
-          import android.content.Intent
-          class StopReceiver : BroadcastReceiver() {
-              override fun onReceive(c: Context, i: Intent) {
-                  if (i.action == "STOP_JARVIS") {
-                      JarvisAccessibilityService.killSwitch.set(true)
-                      c.stopService(Intent(c, JarvisForegroundService::class.java))
-                  }
-              }
-          }
-          EOF
-
-          cat << 'EOF' > android/app/src/main/res/xml/accessibility_service_config.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-              android:accessibilityEventTypes="typeAllMask"
-              android:accessibilityFeedbackType="feedbackGeneric"
-              android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
-              android:canPerformGestures="true"
-              android:canRetrieveWindowContent="true"
-              android:canTakeScreenshot="true"
-              android:description="@string/accessibility_desc"
-              android:notificationTimeout="100" />
-          EOF
-
-          cat << 'EOF' > android/app/src/main/res/values/strings.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <string name="app_name">Jarvis</string>
-              <string name="accessibility_desc">Jarvis ko screen dekhne ki anumati deta hai. Sirf aapke phone pe.</string>
-          </resources>
-          EOF
-
-          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <uses-permission android:name="android.permission.INTERNET" />
-              <uses-permission android:name="android.permission.RECORD_AUDIO" />
-              <application android:label="Jarvis" android:name="${applicationName}" android:icon="@mipmap/ic_launcher">
-                  <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:theme="@style/LaunchTheme" android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode" android:hardwareAccelerated="true" android:windowSoftInputMode="adjustResize">
-                      <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme" />
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
-                      </intent-filter>
-                  </activity>
-                  <service android:name=".JarvisAccessibilityService" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-                      <intent-filter>
-                          <action android:name="android.accessibilityservice.AccessibilityService" />
-                      </intent-filter>
-                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service_config" />
-                  </service>
-                  <service android:name=".JarvisForegroundService" android:exported="false" android:foregroundServiceType="specialUse">
-                      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="ui_automation" />
-                  </service>
-                  <receiver android:name=".StopReceiver" android:exported="false" />
-                  <meta-data android:name="flutterEmbedding" android:value="2" />
-              </application>
-              <queries>
-                  <intent>
-                      <action android:name="android.intent.action.PROCESS_TEXT"/>
-                      <data android:mimeType="text/plain"/>
-                  </intent>
-                  <intent>
-                      <action android:name="android.speech.RecognitionService" />
-                  </intent>
-              </queries>
-          </manifest>
-          EOF
-
-      - name: Get dependencies
+      - name: Install packages
         run: flutter pub get
 
       - name: Build APK
@@ -954,4 +946,4 @@ jobs:
         with:
           name: jarvis-apk
           path: build/app/outputs/flutter-apk/app-debug.apk
-          retention-days: 30
+          if-no-files-found: error
