@@ -29,6 +29,18 @@ jobs:
       - name: Create Flutter project
         run: flutter create --org com.example --project-name jarvis --platforms android .
 
+      # 1. Gradle वर्ज़न को 8.5 पर अपडेट करें
+      - name: Update Gradle version
+        run: |
+          cat << 'EOF' > android/gradle/wrapper/gradle-wrapper.properties
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
+          networkTimeout=10000
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
       - name: Write android/settings.gradle
         run: |
           cat << 'EOF' > android/settings.gradle
