@@ -29,7 +29,15 @@ jobs:
       - name: Create Flutter project
         run: flutter create --org com.example --project-name jarvis --platforms android .
 
-      # 1. pubspec.yaml लिखें (speech_to_text का वर्ज़न 5.6.0 पिन करें)
+      # 1. Gradle फ़ाइलों को मॉडिफ़ाई करें (Kotlin 1.8.0 और compileSdk 36 सेट करें)
+      - name: Patch Gradle files
+        run: |
+          # android/build.gradle में Kotlin वर्ज़न बढ़ाएं
+          sed -i 's/ext.kotlin_version = .*/ext.kotlin_version = "1.8.0"/' android/build.gradle
+          # android/app/build.gradle में compileSdk 36 सेट करें
+          sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/' android/app/build.gradle
+
+      # 2. pubspec.yaml लिखें
       - name: Write pubspec.yaml
         run: |
           cat << 'EOF' > pubspec.yaml
@@ -56,7 +64,7 @@ jobs:
             uses-material-design: true
           EOF
 
-      # 2. lib/main.dart लिखें
+      # 3. lib/main.dart लिखें (डिफ़ॉल्ट फ़ाइल को अपने कोड से बदलें)
       - name: Write lib/main.dart
         run: |
           mkdir -p lib
@@ -483,7 +491,7 @@ jobs:
           }
           EOF
 
-      # 3. custom Android files
+      # 4. कस्टम Android फ़ाइलें लिखें
       - name: Write custom Android files
         run: |
           KT=android/app/src/main/kotlin/com/example/jarvis
@@ -812,12 +820,15 @@ jobs:
           </manifest>
           EOF
 
+      # 5. डिपेंडेंसी इंस्टॉल करें
       - name: Get dependencies
         run: flutter pub get
 
+      # 6. APK बिल्ड करें
       - name: Build APK
         run: flutter build apk --debug
 
+      # 7. APK अपलोड करें
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
