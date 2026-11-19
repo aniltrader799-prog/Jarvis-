@@ -29,15 +29,7 @@ jobs:
       - name: Create Flutter project
         run: flutter create --org com.example --project-name jarvis --platforms android .
 
-      # 1. Gradle फ़ाइलों को मॉडिफ़ाई करें (Kotlin 1.8.0 और compileSdk 36 सेट करें)
-      - name: Patch Gradle files
-        run: |
-          # android/build.gradle में Kotlin वर्ज़न बढ़ाएं
-          sed -i 's/ext.kotlin_version = .*/ext.kotlin_version = "1.8.0"/' android/build.gradle
-          # android/app/build.gradle में compileSdk 36 सेट करें
-          sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/' android/app/build.gradle
-
-      # 2. pubspec.yaml लिखें
+      # 1. pubspec.yaml में speech_to_text को 7.0.0 पर अपडेट करें
       - name: Write pubspec.yaml
         run: |
           cat << 'EOF' > pubspec.yaml
@@ -55,16 +47,115 @@ jobs:
             http: ^1.2.0
             flutter_secure_storage: ^9.2.2
             flutter_tts: ^4.0.2
-            speech_to_text: 5.6.0
-
-          dependency_overrides:
-            speech_to_text: 5.6.0
+            speech_to_text: ^7.0.0
 
           flutter:
             uses-material-design: true
           EOF
 
-      # 3. lib/main.dart लिखें (डिफ़ॉल्ट फ़ाइल को अपने कोड से बदलें)
+      # 2. android/build.gradle फाइल को पूरी तरह से ओवरराइट करके Kotlin 1.9.10 सेट करें
+      - name: Write android/build.gradle
+        run: |
+          cat << 'EOF' > android/build.gradle
+          buildscript {
+              ext.kotlin_version = '1.9.10'
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.3.0'
+                  classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.buildDir = '../build'
+          subprojects {
+              project.buildDir = "${rootProject.buildDir}/${project.name}"
+          }
+          subprojects {
+              project.evaluationDependsOn(':app')
+          }
+
+          tasks.register("clean", Delete) {
+              delete rootProject.buildDir
+          }
+          EOF
+
+      # 3. android/app/build.gradle फाइल में compileSdk 36 सेट करें
+      - name: Write android/app/build.gradle
+        run: |
+          cat << 'EOF' > android/app/build.gradle
+          plugins {
+              id "com.android.application"
+              id "kotlin-android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+
+          def localProperties = new Properties()
+          def localPropertiesFile = rootProject.file('local.properties')
+          if (localPropertiesFile.exists()) {
+              localPropertiesFile.withReader('UTF-8') { reader ->
+                  localProperties.load(reader)
+              }
+          }
+
+          def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+          if (flutterVersionCode == null) {
+              flutterVersionCode = '1'
+          }
+
+          def flutterVersionName = localProperties.getProperty('flutter.versionName')
+          if (flutterVersionName == null) {
+              flutterVersionName = '1.0'
+          }
+
+          android {
+              namespace "com.example.jarvis"
+              compileSdk 36
+              ndkVersion flutter.ndkVersion
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+
+              kotlinOptions {
+                  jvmTarget = '1.8'
+              }
+
+              sourceSets {
+                  main.java.srcDirs += 'src/main/kotlin'
+              }
+
+              defaultConfig {
+                  applicationId "com.example.jarvis"
+                  minSdkVersion 21
+                  targetSdkVersion 34
+                  versionCode flutterVersionCode.toInteger()
+                  versionName flutterVersionName
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.debug
+                  }
+              }
+          }
+
+          flutter {
+              source '../..'
+          }
+          EOF
+
+      # 4. lib/main.dart और बाकी कस्टम Android फाइलें लिखें
       - name: Write lib/main.dart
         run: |
           mkdir -p lib
@@ -491,7 +582,7 @@ jobs:
           }
           EOF
 
-      # 4. कस्टम Android फ़ाइलें लिखें
+      # 5. कस्टम Android फ़ाइलें लिखें
       - name: Write custom Android files
         run: |
           KT=android/app/src/main/kotlin/com/example/jarvis
@@ -820,15 +911,15 @@ jobs:
           </manifest>
           EOF
 
-      # 5. डिपेंडेंसी इंस्टॉल करें
+      # 6. डिपेंडेंसी इंस्टॉल करें
       - name: Get dependencies
         run: flutter pub get
 
-      # 6. APK बिल्ड करें
+      # 7. APK बिल्ड करें
       - name: Build APK
         run: flutter build apk --debug
 
-      # 7. APK अपलोड करें
+      # 8. APK अपलोड करें
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
