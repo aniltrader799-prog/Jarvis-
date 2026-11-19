@@ -19,17 +19,18 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
+      # 1. Flutter वर्ज़न 3.22.3 पर सेट करें (3.24 में Gradle कॉन्फ्लिक्ट होता है)
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.22.3'
           channel: 'stable'
           cache: true
 
       - name: Create Flutter project
         run: flutter create --org com.example --project-name jarvis --platforms android .
 
-      # 1. pubspec.yaml में speech_to_text को 7.0.0 पर अपडेट करें
+      # 2. pubspec.yaml में speech_to_text को 7.0.0 पर पिन करें
       - name: Write pubspec.yaml
         run: |
           cat << 'EOF' > pubspec.yaml
@@ -47,13 +48,16 @@ jobs:
             http: ^1.2.0
             flutter_secure_storage: ^9.2.2
             flutter_tts: ^4.0.2
-            speech_to_text: ^7.0.0
+            speech_to_text: 7.0.0
+
+          dependency_overrides:
+            speech_to_text: 7.0.0
 
           flutter:
             uses-material-design: true
           EOF
 
-      # 2. android/build.gradle फाइल को पूरी तरह से ओवरराइट करके Kotlin 1.9.10 सेट करें
+      # 3. android/build.gradle फाइल को सही Kotlin और Gradle वर्ज़न के साथ लिखें
       - name: Write android/build.gradle
         run: |
           cat << 'EOF' > android/build.gradle
@@ -89,7 +93,7 @@ jobs:
           }
           EOF
 
-      # 3. android/app/build.gradle फाइल में compileSdk 36 सेट करें
+      # 4. android/app/build.gradle फाइल में compileSdk 36 और minSdk 21 सेट करें
       - name: Write android/app/build.gradle
         run: |
           cat << 'EOF' > android/app/build.gradle
@@ -120,7 +124,7 @@ jobs:
           android {
               namespace "com.example.jarvis"
               compileSdk 36
-              ndkVersion flutter.ndkVersion
+              ndkVersion "27.0.12077973"
 
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_1_8
@@ -155,7 +159,7 @@ jobs:
           }
           EOF
 
-      # 4. lib/main.dart और बाकी कस्टम Android फाइलें लिखें
+      # 5. lib/main.dart लिखें
       - name: Write lib/main.dart
         run: |
           mkdir -p lib
@@ -582,7 +586,7 @@ jobs:
           }
           EOF
 
-      # 5. कस्टम Android फ़ाइलें लिखें
+      # 6. कस्टम Android फ़ाइलें लिखें
       - name: Write custom Android files
         run: |
           KT=android/app/src/main/kotlin/com/example/jarvis
@@ -911,15 +915,15 @@ jobs:
           </manifest>
           EOF
 
-      # 6. डिपेंडेंसी इंस्टॉल करें
+      # 7. डिपेंडेंसी इंस्टॉल करें
       - name: Get dependencies
         run: flutter pub get
 
-      # 7. APK बिल्ड करें
+      # 8. APK बिल्ड करें
       - name: Build APK
         run: flutter build apk --debug
 
-      # 8. APK अपलोड करें
+      # 9. APK अपलोड करें
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
