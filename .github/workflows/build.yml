@@ -584,7 +584,7 @@ jobs:
 
           class Gemini {
             final String apiKey, model, lang;
-            Gemini({required this.apiKey, this.model = 'gemini-2.5-flash',
+            Gemini({required this.apiKey, this.model = 'gemini-3.5-flash',
                     this.lang = 'hi-IN'});
             Future<JarvisAction> decide({
               required String goal, required Shot? screenshot,
